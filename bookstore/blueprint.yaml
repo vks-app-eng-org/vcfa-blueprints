@@ -10,11 +10,27 @@
 # ============================================================================
 formatVersion: 2
 name: The Bookstore App
-version: 1
+version: 1.0
 metadata:
   deploymentSettings:
     disableUpdateDay2Action: true
     hideDisabledDay2Actions: true
+outputs:
+  __deploymentOverview:
+    value: |-
+      ## Bookstore E-commerce Application
+      A production-ready e-commerce platform built to demonstrate VMware Cloud Foundation (VCF) 9.0 capabilities. 
+      Features enterprise-grade infrastructure including Elasticsearch search, Redis caching, MinIO object storage, 
+      and real-world content from Project Gutenberg.
+
+      ### Application Details
+
+      **Bookstore Url   : ${resource.Bookstore_CM.object.data["bookstore-url"]}**
+
+      **Reader Url      : ${resource.Bookstore_CM.object.data["reader-url"]}**
+
+      **For more details:** check https://github.com/tmm-demo-apps/bookstore-app
+           
 inputs:
 ############################################
 # Dynamic Data Retrieval for Known objects #
@@ -80,32 +96,89 @@ inputs:
     title: VKS Version
     description: VKS Version
     oneOf:
-      - title: v1.36.2
-        const: v1.36.2---vmware.2-vkr.3
-    default: v1.36.2---vmware.2-vkr.3
-outputs:
-  __deploymentOverview:
-    value: |-
-      ## Bookstore E-commerce Application
-      A production-ready e-commerce platform built to demonstrate VMware Cloud Foundation (VCF) 9.0 capabilities. 
-      Features enterprise-grade infrastructure including Elasticsearch search, Redis caching, MinIO object storage, 
-      and real-world content from Project Gutenberg.
-
-      ### Application Details
-
-      **Bookstore Url   : https://bookstore.${input.vks_name}.all-apps-1.cloudlab.cx**
-
-      **Reader Url      : https://reader.${input.vks_name}.all-apps-1.cloudlab.cx**
-
-      **For more details:** check https://github.com/tmm-demo-apps/bookstore-app
+      - title: v1.36.1
+        const: v1.36.1---vmware.4-vkr.5
+    default: v1.36.1---vmware.4-vkr.5
 resources:
   Namespace:
     type: CCI.Supervisor.Namespace
+    metadata:
+      layoutPosition:
+        - 1
+        - 1
     properties:
       name: ${input.namespace}
       existing: true
+  VKS-Job-SA:
+    type: CCI.Supervisor.Resource
+    metadata:
+      layoutPosition:
+        - 0
+        - 0
+    properties:
+      context: ${resource.Namespace.id}
+      manifest:
+        apiVersion: v1
+        kind: ServiceAccount
+        metadata:
+          name: ${input.vks_name}-vks-job-sa
+  CM_Role:
+    type: CCI.Supervisor.Resource
+    dependsOn:
+      - VKS-Job-SA
+    metadata:
+      layoutPosition:
+        - 1
+        - 0
+    properties:
+      context: ${resource.Namespace.id}
+      manifest:
+        apiVersion: rbac.authorization.k8s.io/v1
+        kind: Role
+        metadata:
+          name: ${input.vks_name}-configmap-manager
+        rules:
+          - apiGroups:
+              - ''
+            resources:
+              - configmaps
+            verbs:
+              - get
+              - list
+              - watch
+              - create
+              - delete
+              - patch
+  CM_Role_Binding:
+    type: CCI.Supervisor.Resource
+    dependsOn:
+      - CM_Role
+    metadata:
+      layoutPosition:
+        - 2
+        - 0
+    properties:
+      context: ${resource.Namespace.id}
+      manifest:
+        apiVersion: rbac.authorization.k8s.io/v1
+        kind: RoleBinding
+        metadata:
+          name: ${input.vks_name}-configmap-manager-binding
+        subjects:
+          - kind: ServiceAccount
+            name: ${input.vks_name}-vks-job-sa
+        roleRef:
+          kind: Role
+          name: ${input.vks_name}-configmap-manager
+          apiGroup: rbac.authorization.k8s.io
   cert-manager-addon:
     type: CCI.Supervisor.Resource
+    dependsOn:
+      - CM_Role_Binding
+    metadata:
+      layoutPosition:
+        - 2
+        - 1
     properties:
       context: ${resource.Namespace.id}
       manifest:
@@ -120,82 +193,37 @@ resources:
             - selector:
                 matchLabels:
                   cluster.x-k8s.io/cluster-name: ${input.vks_name}
-  istio-addon:
+  istio-secret:
     type: CCI.Supervisor.Resource
     dependsOn:
       - cert-manager-addon
+    metadata:
+      layoutPosition:
+        - 3
+        - 1
     properties:
       context: ${resource.Namespace.id}
       manifest:
-        apiVersion: addons.kubernetes.vmware.com/v1alpha1
-        kind: AddonInstall
+        apiVersion: v1
+        kind: Secret
         metadata:
-          name: ${input.vks_name}-istio
-        spec:
-          addonRef:
-            name: istio
-          addonConfigRef:
-            name: ${input.vks_name}-istio-values
-            kind: Secret
-          clusters:
-            - selector:
-                matchLabels:
-                  cluster.x-k8s.io/cluster-name: ${input.vks_name}
-  external-dns-addon-config:
-    type: CCI.Supervisor.Resource
-    dependsOn:
-      - istio-addon
-    properties:
-      context: ${resource.Namespace.id}
-      manifest:
-        apiVersion: addons.kubernetes.vmware.com/v1alpha1
-        kind: AddonConfig
-        metadata:
-          name: ${input.vks_name}-external-dns
-        spec:
-          clusterName: ${input.vks_name}
-          values:
-            deployment:
-              args:
-                - '--source=service'
-                - '--source=ingress'
-                - '--txt-owner-id=${input.vks_name}'
-                - '--registry=txt'
-                - '--domain-filter=${input.vks_name}.all-apps-1.cloudlab.cx'
-                - '--provider=rfc2136'
-                - '--rfc2136-host=172.16.0.1'
-                - '--rfc2136-port=53'
-                - '--rfc2136-zone=all-apps-1.cloudlab.cx'
-                - '--rfc2136-tsig-secret-alg=hmac-sha256'
-                - '--rfc2136-tsig-keyname=externaldns-key'
-                - '--rfc2136-tsig-axfr'
-            rfc2136:
-              tsigSecret: zos4/hwKQ7Ztdt2MpQDhcyoTcm4xre9JfZPH8WJIHdM=
-  external-dns-addon:
-    type: CCI.Supervisor.Resource
-    dependsOn:
-      - external-dns-addon-config
-    properties:
-      context: ${resource.Namespace.id}
-      manifest:
-        apiVersion: addons.kubernetes.vmware.com/v1alpha1
-        kind: AddonInstall
-        metadata:
-          name: ${input.vks_name}-external-dns
-        spec:
-          addonRef:
-            name: external-dns
-          addonConfigRef:
-            name: ${input.vks_name}-external-dns-values
-            kind: Secret
-          clusters:
-            - selector:
-                matchLabels:
-                  cluster.x-k8s.io/cluster-name: ${input.vks_name}
+          name: ${input.vks_name}-istio-values
+        stringData:
+          values.yaml: |
+            #@data/values
+            #@overlay/match-child-defaults missing_ok=True
+            ---
+            gateways:
+              ingress:
+                enabled: true
   CLUSTER:
     type: CCI.Supervisor.Resource
     dependsOn:
-      - external-dns-addon
+      - istio-addon
+    metadata:
+      layoutPosition:
+        - 4
+        - 0
     properties:
       context: ${resource.Namespace.id}
       wait:
@@ -267,62 +295,178 @@ resources:
                     overrides:
                       - name: vmClass
                         value: ${input.vm_size}
-  ARGOCD_ATTACH:
+  istio-addon:
+    type: CCI.Supervisor.Resource
+    dependsOn:
+      - istio-secret
+    metadata:
+      layoutPosition:
+        - 4
+        - 1
+    properties:
+      context: ${resource.Namespace.id}
+      manifest:
+        apiVersion: addons.kubernetes.vmware.com/v1alpha1
+        kind: AddonInstall
+        metadata:
+          name: ${input.vks_name}-istio
+        spec:
+          addonRef:
+            name: istio
+          addonConfigRef:
+            name: ${input.vks_name}-istio-values
+            kind: Secret
+          clusters:
+            - selector:
+                matchLabels:
+                  cluster.x-k8s.io/cluster-name: ${input.vks_name}
+  VKS_Job:
     type: CCI.Supervisor.Resource
     dependsOn:
       - CLUSTER
+    metadata:
+      layoutPosition:
+        - 5
+        - 0
+    createTimeout: 600m
     properties:
       context: ${resource.Namespace.id}
+      wait:
+        conditions:
+          - indicatesFailure: false
+            status: 'True'
+            type: Complete
+        fields:
+          - indicatesFailure: true
+            path: status.failed
+            value: '1'
       manifest:
-        apiVersion: argocd-service.vsphere.vmware.com/v1alpha1
-        kind: ManagedEntity
+        apiVersion: batch/v1
+        kind: Job
         metadata:
-          name: ${input.vks_name}-${input.namespace}-default-project-ui
+          name: vks-job-${env.shortDeploymentId}
         spec:
-          targetRef:
-            apiGroup: cluster.x-k8s.io
-            kind: Cluster
-            name: ${input.vks_name}
-            namespace: ${input.namespace}
-            project: default-project
-  ARGOCD_APPLICATION:
+          completions: 1
+          parallelism: 1
+          ttlSecondsAfterFinished: 600
+          backoffLimit: 0
+          template:
+            spec:
+              serviceAccountName: ${input.vks_name}-vks-job-sa
+              containers:
+                - name: vks-job
+                  image: paif.packages.broadcom.com/tkg-gpu-console:9.0.0.0
+                  #image: harbor-lvn.vpaif.net/paif-91-public/images/tkg-gpu-console:9.0.0.0
+                  volumeMounts:
+                    - name: cluster-kubeconfig-volume
+                      mountPath: /etc/vks-kubeconfig
+                      readOnly: true
+                  command:
+                    - /bin/bash
+                    - '-c'
+                  args:
+                    - |
+                      set -x
+                      # Function to set KUBECONFIG to VKS KubeConfig
+                      set_vks_kubeconfig() {
+                        local kubeconfig_file="/etc/vks-kubeconfig/vks-cluster-kubeconfig-admin"
+
+                        if [ ! -f "$kubeconfig_file" ]; then
+                          echo "Failure: VKS kubeconfig file does not exist: $kubeconfig_file"
+                          exit 1
+                        fi
+
+                        export KUBECONFIG="$kubeconfig_file"
+                        echo "Success: VKS kubeconfig is set to $KUBECONFIG"
+                      }
+
+                      # Call the set_vks_kubeconfig() function
+                      set_vks_kubeconfig
+
+                      # get to verify current context 
+                      #=========================================
+                      kubectl config current-context
+
+                      # Install git
+                      #=========================================
+                      apt update
+                      apt install git -y
+
+                      # Clone the bookstore repo to your jumpbox
+                      #=========================================
+
+                      #timeout 300 sh -c 'until git clone https://github.com/tmm-demo-apps/bookstore-app.git; do echo "git clone failed, retrying in 15 seconds..."; rm -rf bookstore-app; sleep 15; done' || exit 1
+                      git clone https://github.com/tmm-demo-apps/bookstore-app.git
+                      sleep 15
+                      cd bookstore-app
+
+                      # Build Helm dependencies
+                      #=========================================         
+                      helm dependency update ./helm/demo-suite
+
+                      # Deploy bookstore application
+                      #=========================================   
+                      helm install -n default demo ./helm/demo-suite -f ./helm/demo-suite/values-small.yaml --set global.domain=dummy.local --set global.storageClassName=${input.storageclass} --set chatbot.enabled=false --set bookstore.image.pullPolicy=Always --set reader.epubSeed.enabled=true --set reader.image.pullPolicy=Always --timeout 10m
+
+                      # 2. Wait for the LoadBalancer to get an IP from the infrastructure
+                      echo "Waiting for Gateway IP..."
+                      while [ -z "$(kubectl get svc demo-gateway-istio -n bookstore -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null)" ]; do 
+                        sleep 2 
+                      done
+
+                      # 3. Grab the IP
+                      INGRESS_IP=$(kubectl get svc demo-gateway-istio -n bookstore -o jsonpath='{.status.loadBalancer.ingress[0].ip}')
+                      echo "Gateway IP is: $INGRESS_IP"
+
+                      helm upgrade -n default demo ./helm/demo-suite -f ./helm/demo-suite/values-small.yaml --set global.domain=$INGRESS_IP.sslip.io --set global.storageClassName=${input.storageclass} --set chatbot.enabled=false --set bookstore.image.pullPolicy=Always --set reader.epubSeed.enabled=true --set reader.image.pullPolicy=Always --timeout 10m
+
+
+                      # Echo Helm depoloyment completed
+                      #=========================================                         
+                      echo "Helm deployment completed"
+                      # Echo Helm depoloyment completed
+                      #=========================================                         
+                      echo "Helm deployment completed"
+
+                      # Create bookstore-endpoints ConfigMap on the parent Namespace
+                      #============================================================= 
+                      unset KUBECONFIG
+                      kubectl create configmap ${input.vks_name}-bookstore-endpoints --from-literal=ingress-ip=$INGRESS_IP --from-literal=bookstore-url=https://bookstore.$INGRESS_IP.sslip.io --from-literal=reader-url=https://reader.$INGRESS_IP.sslip.io --dry-run=client -o yaml | kubectl apply -f -                      
+
+                      # Enable / Disable Debug Mode to access the Job/pod running the script. DEBUG_MODE=true/false
+                      #============================================================================================ 
+                      DEBUG_MODE=false
+
+                      if [ "$DEBUG_MODE" = true ]; then
+                        echo "Pod entering debug mode — sleeping forever"
+                      else
+                        echo "Pod running normally — debug mode disabled"
+                      fi
+
+                      while $DEBUG_MODE; do
+                        sleep 3600
+                      done                      
+              restartPolicy: Never
+              volumes:
+                - name: cluster-kubeconfig-volume
+                  secret:
+                    secretName: ${to_lower(input.vks_name)}-kubeconfig
+                    items:
+                      - key: value
+                        path: vks-cluster-kubeconfig-admin
+  Bookstore_CM:
     type: CCI.Supervisor.Resource
     dependsOn:
-      - ARGOCD_ATTACH
+      - VKS_Job
+    metadata:
+      layoutPosition:
+        - 6
+        - 0
     properties:
+      existing: true
       context: ${resource.Namespace.id}
-      wait: null
       manifest:
-        apiVersion: argoproj.io/v1alpha1
-        kind: Application
+        apiVersion: v1
+        kind: ConfigMap
         metadata:
-          name: ${input.vks_name}-bookstore-app
-        spec:
-          project: default
-          source:
-            repoURL: https://github.com/plameniliev/bookstore-app.git
-            targetRevision: HEAD
-            path: helm/demo-suite
-            helm:
-              valueFiles:
-                - values-small.yaml
-              parameters:
-                - name: global.domain
-                  value: ${input.vks_name}.all-apps-1.cloudlab.cx
-                - name: global.storageClassName
-                  value: ${input.storageclass}
-                - name: chatbot.enabled
-                  value: 'false'
-                - name: bookstore.image.pullPolicy
-                  value: Always
-                - name: reader.epubSeed.enabled
-                  value: 'true'
-                - name: reader.image.pullPolicy
-                  value: Always
-          destination:
-            name: ${input.vks_name}-${input.namespace}
-            namespace: default
-          syncPolicy:
-            automated:
-              prune: true
-              selfHeal: true
+          name: ${input.vks_name}-bookstore-endpoints
