@@ -1,0 +1,283 @@
+# ============================================================================
+# File: The Bookstore App.yaml
+# Author: Maher AlAsfar
+# Email: maher.alasfar@broadcom.com
+# Created: 2025-03-01
+# Last Modified: 2026-08-01
+# Description: VCFA 9.1 Blueprint to Deploy the bookstore e-commerce app on a newly provisoined VKS Cluster in an existing vSphere Namespace
+# App repo : https://github.com/tmm-demo-apps/bookstore-app
+# Version: 1.0
+# ============================================================================
+formatVersion: 2
+name: The Bookstore App
+version: 1
+metadata:
+  deploymentSettings:
+    disableUpdateDay2Action: true
+    hideDisabledDay2Actions: true
+inputs:
+############################################
+# Dynamic Data Retrieval for Known objects #
+############################################
+  namespace:
+    type: string
+    title: Namespace
+    $data: /data/namespaces
+  vm_size:
+    type: string
+    title: Virtual Machine Class
+    $data: /data/virtualmachineclasses?namespace={{namespace}}
+  storageclass:
+    type: string
+    title: Storage Class
+    $data: /data/storageclasses?namespace={{namespace}}
+#############################################       
+  vks_name:
+    type: string
+    pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+    maxLength: 63
+    minLength: 1
+    title: VKS K8s Cluster Name
+    description: ' Enter a name for the VKS K8s Cluster'
+  controlPlaneCount:
+    type: integer
+    title: VKS ControlPlane Node count
+    description: Control plane node count
+    default: 1
+    enum:
+      - 1
+      - 3
+  minWorkerCount:
+    type: string
+    title: Min VKS Worker Node count
+    description: Minimum VKS Worker node count
+    default: '1'
+    oneOf:
+      - title: 1
+        const: '1'
+      - title: 2
+        const: '2'
+      - title: 3
+        const: '3'
+  maxWorkerCount:
+    type: string
+    title: Max VKS Worker Node count
+    description: Maximum VKS Worker node count
+    default: '3'
+    oneOf:
+      - title: 1
+        const: '1'
+      - title: 2
+        const: '2'
+      - title: 3
+        const: '3'
+      - title: 4
+        const: '4'
+      - title: 5
+        const: '5'
+  vksVersion:
+    type: string
+    title: VKS Version
+    description: VKS Version
+    oneOf:
+      - title: v1.36.1
+        const: v1.36.1---vmware.4-vkr.5
+    default: v1.36.1---vmware.4-vkr.5
+resources:
+  Namespace:
+    type: CCI.Supervisor.Namespace
+    properties:
+      name: ${input.namespace}
+      existing: true
+  cert-manager-addon:
+    type: CCI.Supervisor.Resource
+    dependsOn:
+      - CM_Role_Binding
+    properties:
+      context: ${resource.Namespace.id}
+      manifest:
+        apiVersion: addons.kubernetes.vmware.com/v1alpha1
+        kind: AddonInstall
+        metadata:
+          name: ${input.vks_name}-cert-manager
+        spec:
+          addonRef:
+            name: cert-manager
+          clusters:
+            - selector:
+                matchLabels:
+                  cluster.x-k8s.io/cluster-name: ${input.vks_name}
+  istio-secret:
+    type: CCI.Supervisor.Resource
+    dependsOn:
+      - cert-manager-addon
+    properties:
+      context: ${resource.Namespace.id}
+      manifest:
+        apiVersion: v1
+        kind: Secret
+        metadata:
+          name: ${input.vks_name}-istio-values
+        stringData:
+          values.yaml: |
+            #@data/values
+            #@overlay/match-child-defaults missing_ok=True
+            ---
+            gateways:
+              ingress:
+                enabled: true
+  istio-addon:
+    type: CCI.Supervisor.Resource
+    dependsOn:
+      - istio-secret
+    properties:
+      context: ${resource.Namespace.id}
+      manifest:
+        apiVersion: addons.kubernetes.vmware.com/v1alpha1
+        kind: AddonInstall
+        metadata:
+          name: ${input.vks_name}-istio
+        spec:
+          addonRef:
+            name: istio
+          addonConfigRef:
+            name: ${input.vks_name}-istio-values
+            kind: Secret
+          clusters:
+            - selector:
+                matchLabels:
+                  cluster.x-k8s.io/cluster-name: ${input.vks_name}
+  CLUSTER:
+    type: CCI.Supervisor.Resource
+    dependsOn:
+      - istio-addon
+    properties:
+      context: ${resource.Namespace.id}
+      wait:
+        conditions:
+          - type: ControlPlaneInitialized
+            status: 'True'
+          - type: TopologyReconciled
+            status: 'True'
+          - type: WorkersAvailable
+            status: 'True'
+        fields:
+          - indicatesFailure: false
+            path: status.phase
+            value: Provisioned
+          - indicatesFailure: false
+            path: status.initialization.controlPlaneInitialized
+            value: 'true'
+          - indicatesFailure: false
+            path: status.initialization.infrastructureProvisioned
+            value: 'true'
+      manifest:
+        apiVersion: cluster.x-k8s.io/v1beta2
+        kind: Cluster
+        metadata:
+          name: ${input.vks_name}
+          labels:
+            cluster.x-k8s.io/cluster-name: ${input.vks_name}
+        spec:
+          clusterNetwork:
+            pods:
+              cidrBlocks:
+                - 192.168.156.0/20
+            services:
+              cidrBlocks:
+                - 10.96.0.0/12
+            serviceDomain: cluster.local
+          topology:
+            classRef:
+              name: builtin-generic-v3.7.0
+              namespace: vmware-system-vks-public
+            version: ${input.vksVersion}
+            variables:
+              - name: vmClass
+                value: ${input.vm_size}
+              - name: storageClass
+                value: ${input.storageclass}
+              - name: kubernetes
+                value:
+                  security:
+                    podSecurityStandard:
+                      audit: restricted
+                      enforce: privileged
+                      warn: restricted
+            controlPlane:
+              replicas: ${input.controlPlaneCount}
+              metadata:
+                annotations:
+                  run.tanzu.vmware.com/resolve-os-image: os-name=photon
+            workers:
+              machineDeployments:
+                - class: node-pool
+                  name: ${input.vks_name}-np
+                  metadata:
+                    annotations:
+                      cluster.x-k8s.io/cluster-api-autoscaler-node-group-max-size: ${input.maxWorkerCount}
+                      cluster.x-k8s.io/cluster-api-autoscaler-node-group-min-size: ${input.minWorkerCount}
+                      run.tanzu.vmware.com/resolve-os-image: os-name=photon
+                  variables:
+                    overrides:
+                      - name: vmClass
+                        value: ${input.vm_size}
+  ARGOCD_ATTACH:
+    type: CCI.Supervisor.Resource
+    dependsOn:
+      - CLUSTER
+    properties:
+      context: ${resource.Namespace.id}
+      manifest:
+        apiVersion: argocd-service.vsphere.vmware.com/v1alpha1
+        kind: ManagedEntity
+        metadata:
+          name: ${input.vks_name}-${input.namespace}-default-project-ui
+        spec:
+          targetRef:
+            apiGroup: cluster.x-k8s.io
+            kind: Cluster
+            name: ${input.vks_name}
+            namespace: ${input.namespace}
+            project: default-project
+  ARGOCD_APPLICATION:
+    type: CCI.Supervisor.Resource
+    dependsOn:
+      - ARGOCD_ATTACH
+    properties:
+      context: ${resource.Namespace.id}
+      wait: null
+      manifest:
+        apiVersion: argoproj.io/v1alpha1
+        kind: Application
+        metadata:
+          name: ${input.vks_name}-bookstore-app
+        spec:
+          project: default
+          source:
+            repoURL: https://github.com/tmm-demo-apps/bookstore-app.git
+            targetRevision: HEAD
+            path: helm/demo-suite
+            helm:
+              valueFiles:
+                - values-small.yaml
+              parameters:
+                - name: global.domain
+                  value: cloudlab.cx
+                - name: global.storageClassName
+                  value: ${input.storageclass}
+                - name: chatbot.enabled
+                  value: 'false'
+                - name: bookstore.image.pullPolicy
+                  value: Always
+                - name: reader.epubSeed.enabled
+                  value: 'true'
+                - name: reader.image.pullPolicy
+                  value: Always
+          destination:
+            name: ${input.vks_name}-${input.namespace}
+            namespace: default
+          syncPolicy:
+            automated:
+              prune: true
+              selfHeal: true
