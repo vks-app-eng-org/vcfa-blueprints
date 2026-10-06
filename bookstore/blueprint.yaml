@@ -80,9 +80,24 @@ inputs:
     title: VKS Version
     description: VKS Version
     oneOf:
-      - title: v1.36.1
-        const: v1.36.1---vmware.4-vkr.5
-    default: v1.36.1---vmware.4-vkr.5
+      - title: v1.36.2
+        const: v1.36.2---vmware.2-vkr.3
+    default: v1.36.2---vmware.2-vkr.3
+outputs:
+  __deploymentOverview:
+    value: |-
+      ## Bookstore E-commerce Application
+      A production-ready e-commerce platform built to demonstrate VMware Cloud Foundation (VCF) 9.0 capabilities. 
+      Features enterprise-grade infrastructure including Elasticsearch search, Redis caching, MinIO object storage, 
+      and real-world content from Project Gutenberg.
+
+      ### Application Details
+
+      **Bookstore Url   : https://bookstore.${input.vks_name}.all-apps-1.cloudlab.cx**
+
+      **Reader Url      : https://reader.${input.vks_name}.all-apps-1.cloudlab.cx**
+
+      **For more details:** check https://github.com/tmm-demo-apps/bookstore-app
 resources:
   Namespace:
     type: CCI.Supervisor.Namespace
@@ -91,8 +106,6 @@ resources:
       existing: true
   cert-manager-addon:
     type: CCI.Supervisor.Resource
-    dependsOn:
-      - CM_Role_Binding
     properties:
       context: ${resource.Namespace.id}
       manifest:
@@ -107,29 +120,10 @@ resources:
             - selector:
                 matchLabels:
                   cluster.x-k8s.io/cluster-name: ${input.vks_name}
-  istio-secret:
-    type: CCI.Supervisor.Resource
-    dependsOn:
-      - cert-manager-addon
-    properties:
-      context: ${resource.Namespace.id}
-      manifest:
-        apiVersion: v1
-        kind: Secret
-        metadata:
-          name: ${input.vks_name}-istio-values
-        stringData:
-          values.yaml: |
-            #@data/values
-            #@overlay/match-child-defaults missing_ok=True
-            ---
-            gateways:
-              ingress:
-                enabled: true
   istio-addon:
     type: CCI.Supervisor.Resource
     dependsOn:
-      - istio-secret
+      - cert-manager-addon
     properties:
       context: ${resource.Namespace.id}
       manifest:
@@ -147,10 +141,61 @@ resources:
             - selector:
                 matchLabels:
                   cluster.x-k8s.io/cluster-name: ${input.vks_name}
-  CLUSTER:
+  external-dns-addon-config:
     type: CCI.Supervisor.Resource
     dependsOn:
       - istio-addon
+    properties:
+      context: ${resource.Namespace.id}
+      manifest:
+        apiVersion: addons.kubernetes.vmware.com/v1alpha1
+        kind: AddonConfig
+        metadata:
+          name: ${input.vks_name}-external-dns
+        spec:
+          clusterName: ${input.vks_name}
+          values:
+            deployment:
+              args:
+                - '--source=service'
+                - '--source=ingress'
+                - '--txt-owner-id=${input.vks_name}'
+                - '--registry=txt'
+                - '--domain-filter=${input.vks_name}.all-apps-1.cloudlab.cx'
+                - '--provider=rfc2136'
+                - '--rfc2136-host=172.16.0.1'
+                - '--rfc2136-port=53'
+                - '--rfc2136-zone=all-apps-1.cloudlab.cx'
+                - '--rfc2136-tsig-secret-alg=hmac-sha256'
+                - '--rfc2136-tsig-keyname=externaldns-key'
+                - '--rfc2136-tsig-axfr'
+            rfc2136:
+              tsigSecret: zos4/hwKQ7Ztdt2MpQDhcyoTcm4xre9JfZPH8WJIHdM=
+  external-dns-addon:
+    type: CCI.Supervisor.Resource
+    dependsOn:
+      - external-dns-addon-config
+    properties:
+      context: ${resource.Namespace.id}
+      manifest:
+        apiVersion: addons.kubernetes.vmware.com/v1alpha1
+        kind: AddonInstall
+        metadata:
+          name: ${input.vks_name}-external-dns
+        spec:
+          addonRef:
+            name: external-dns
+          addonConfigRef:
+            name: ${input.vks_name}-external-dns-values
+            kind: Secret
+          clusters:
+            - selector:
+                matchLabels:
+                  cluster.x-k8s.io/cluster-name: ${input.vks_name}
+  CLUSTER:
+    type: CCI.Supervisor.Resource
+    dependsOn:
+      - external-dns-addon
     properties:
       context: ${resource.Namespace.id}
       wait:
@@ -255,7 +300,7 @@ resources:
         spec:
           project: default
           source:
-            repoURL: https://github.com/tmm-demo-apps/bookstore-app.git
+            repoURL: https://github.com/plameniliev/bookstore-app.git
             targetRevision: HEAD
             path: helm/demo-suite
             helm:
@@ -263,7 +308,7 @@ resources:
                 - values-small.yaml
               parameters:
                 - name: global.domain
-                  value: cloudlab.cx
+                  value: ${input.vks_name}.all-apps-1.cloudlab.cx
                 - name: global.storageClassName
                   value: ${input.storageclass}
                 - name: chatbot.enabled
